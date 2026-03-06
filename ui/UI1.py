@@ -311,11 +311,7 @@ class Automationtool(QMainWindow):
     def start_processing(self):
         # 使用 self.current_tool_name 获取当前激活的工具，这个值在 on_tool_changed 中设置
         tool_name = getattr(self, 'current_tool_name', None)
-        
-        if not tool_name:
-            QMessageBox.warning(self, "警告", "请先在左侧选择一个自动化工具！")
-            return
-
+       
         # --- 1. 定义工具配置映射 ---
         tool_map = {
             "仪表提单自动化": {
@@ -346,11 +342,12 @@ class Automationtool(QMainWindow):
                     "date": self.valve_input_date,
                     "number": self.valve_input_number,
                 },
-                # 定义仪表工具的执行步骤
                 "processing_steps": [
                     {"method": "load_csv","store_as": "df"}, 
-                    # 执行 generate_code (仪表有此方法)
-                    {"method": "generate_code","store_as": "df_sort"},              
+                    {"method": "generate_code","store_as": "df_sort"},
+                    {"method":"generate_parameter","store_as":"df"},
+                    {"method": "merge_by_SKU","store_as": "book"},
+                                
                     ],
                 "save_button": self.valve_btn_save_as,
             }
@@ -429,24 +426,35 @@ class Automationtool(QMainWindow):
 
             # ----------------------------------------------------
             # 统一写入申购人信息 (必须在处理循环后，且在保存前)
-            # ----------------------------------------------------
-
-            # ⚠️ 修正语法错误，并检查 df_sort 是否由循环创建成功
-            if hasattr(self.current_processor, 'df_sort') and self.current_processor.df_sort is not None:
-                self.current_processor.df_sort['申购人'] = input_values["applicant"]
-                self.current_processor.df_sort['申购日期'] = input_values["date"]
-                self.current_processor.df_sort['项目号'] = input_values["number"]
-                
-                # 假设 get_note 的功能是写入 Note，它应该在循环中被调用。
-                # 如果您一定要在这里做更多操作，请确保不会重复。
-
-                # ⚠️ 注意：移除了原来这里的 merge_by_SKU，因为它现在在配置循环中执行。
-                
-                self.logger.info("写入申购人信息完成。")
+                if method_name == "generate_code":
+                    if hasattr(self.current_processor, 'df_sort') and self.current_processor.df_sort is not None:
+                            # 1. 注入基础信息
+                            self.current_processor.df_sort['申购人'] = input_values["applicant"]
+                            self.current_processor.df_sort['申购日期'] = input_values["date"]
+                            self.current_processor.df_sort['项目号'] = input_values["number"]
+                            if tool_name == "阀门提单自动化工具":
+                                # 注意：这里要确保 '阀门名称' 列已经存在
+                                self.current_processor.df_sort['备注'] = \
+                                    self.current_processor.df_sort['项目号'].astype(str) + \
+                                    self.current_processor.df_sort['阀门名称'].astype(str)+ \
+                                    self.current_processor.df_sort['阀门位号'].astype(str)
+                                
+                                self.current_processor.df_sort['申购单备注'] = \
+                                    f"【{input_values['number']}】阀门申购单-" + datetime.datetime.now().strftime("%Y-%m-%d")
+                            
+                            elif tool_name == "仪表提单自动化":
+                                self.current_processor.df_sort['备注'] = \
+                                    self.current_processor.df_sort['项目号'].astype(str) + "_" + \
+                                    self.current_processor.df_sort['仪表名称'].astype(str)+\
+                                    self.current_processor.df_sort['仪表位号'].astype(str)
+                                
+                                self.current_processor.df_sort['申购单备注'] = \
+                                    f"【{input_values['number']}】仪表申购单-" + datetime.datetime.now().strftime("%Y-%m-%d")
+                            
+                            self.logger.info("✅ 已注入 UI 参数并预生成【备注】列")             
             else:
                 # 如果 df_sort 仍未创建，则日志会输出此警告（说明配置或类方法有问题）
                 self.logger.warning("处理器中没有找到 df_sort 属性，跳过写入申购信息。")
-
             # --- 4. 启用保存按钮 ---
             config["save_button"].setEnabled(True)
             self.logger.info(f"🎉 【{tool_name}】处理成功！可点击【另存为】保存结果。")
@@ -512,7 +520,7 @@ class Automationtool(QMainWindow):
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         
         file_path, _ = QFileDialog.getSaveFileName(
-            self, 
+            self,  
             f"另存为 {title} 文件", 
             f"{default_name}-{timestamp}.xlsx", 
             "Excel 文件 (*.xlsx)"
