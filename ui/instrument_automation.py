@@ -103,13 +103,15 @@ class InstrumentAutomationProcessor(BaseProcessor):
             self.logger.error(f"❌ 文件加载失败: {str(e)}")
             raise
 
-    def resource_path(self,relative_path):
-        """ 获取资源的绝对路径，用于打包后 """
+    def resource_path(self, relative_path):
+        """ 获取资源的绝对路径，支持开发环境和 PyInstaller 打包 """
         try:
-            # PyInstaller 创建临时文件夹，路径在 _MEIPASS 中
+            # PyInstaller 打包后的临时路径
             base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
+        except AttributeError:
+            # 开发环境下：使用当前脚本所在目录的父目录（即项目根目录）
+            # 假设该方法定义在 ui/ 目录下的某个类中
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(base_path, relative_path)
         
     def extract_chinese(self,text) -> str:
@@ -201,11 +203,11 @@ class InstrumentAutomationProcessor(BaseProcessor):
 
             # 生成 SKU
             sku_list = []
-            mediumn_path = self.resource_path("dataset/medium.xlsx")
+            mediumn_path = self.resource_path("dataset\\medium.xlsx")
             medium_df =  pd.read_excel(mediumn_path, engine='openpyxl')
             medium_df.dropna(subset=['介质', '参数'], inplace=True)
             medium_map = dict(zip(medium_df["介质"], medium_df["参数"]))
-            self.df_sort["参数1"] = self.df_sort["介质"].apply(get_param_text)        
+            self.df_sort["参数1"] = self.df_sort["介质"].apply(get_param_text) if "介质" in self.df_sort.columns else "无"    
             for idx in self.df_sort.index:
                 param1_val = str(self.df_sort.loc[idx, '参数1'])
                 param2_val = str(self.df_sort.loc[idx, '参数2'])
@@ -349,7 +351,7 @@ class InstrumentAutomationProcessor(BaseProcessor):
                         self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：{material_value}"
                         self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{diameter3}m³/h；\n{param2_val}\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}"
                     elif self.ins_name == "法兰液位仪表":
-                        if self.df_sort.loc[idx,"仪表类型"] == "磁翻板":
+                        if (self.df_sort.loc[idx, "仪表类型"] == "磁翻板") or (self.df_sort.loc[idx, "仪表形式"] == "磁翻板"):
                             if "KP" in install_type:
                                 sku = f"LG-FQC-{self.r_val.replace('-','~').split('~')[-1]}-{mat_val}{mat_val}-KP50"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：{material_value}"
@@ -358,11 +360,11 @@ class InstrumentAutomationProcessor(BaseProcessor):
                                 sku = f"LG-FQC-{self.r_val.replace('-','~').split('~')[-1]}-{mat_val}{mat_val}-FL25RF1.0"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：{material_value}"
                                 self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n{param2_val}\n（*）.安装/接管方式：卡盘直径50.5；"
-                        elif self.df_sort.loc[idx,"仪表类型"] == "单法兰":
+                        elif (self.df_sort.loc[idx, "仪表类型"] == "单法兰") or (self.df_sort.loc[idx, "仪表形式"] == "单法兰"):
                             sku = f"LG-DFC-{self.r_val.replace('-','~').split('~')[-1]}-SS{mat_val}-FL50RF1.0"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：304"
                             self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n{param2_val}\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
-                        elif self.df_sort.loc[idx,"仪表类型"] == "双法兰":
+                        elif (self.df_sort.loc[idx, "仪表类型"] == "双法兰") or (self.df_sort.loc[idx, "仪表形式"] == "双法兰"):
                             sku = f"LG-SFC-{self.r_val.replace('-','~').split('~')[-1]}-SS{mat_val}-FL50RF1.0"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：304"
                             self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n（*）.现场显示：LCD显示，带调零功能；\n{param2_val}\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
