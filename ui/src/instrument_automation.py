@@ -6,9 +6,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Optional, Tuple
-from venv import logger
 import numpy as np
-from numpy.random import f
 import openpyxl
 import pandas as pd
 from openpyxl import Workbook
@@ -17,9 +15,6 @@ from openpyxl.styles import Alignment, Font, Border, Side
 from base_processor import BaseProcessor
 import datetime
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
-import os
-import sys
 
 # ====================== QTextEditLogger ======================
 class QTextEditLogger(logging.Handler):
@@ -46,6 +41,12 @@ class InstrumentAutomationProcessor(BaseProcessor):
         self.logger = None
         self.log_handler = QTextEditLogger()
         # 注意：不要在这里调用 load_csv，因为它需要 logger 已经初始化
+
+    @staticmethod
+    def resource_path(relative_path):
+        """兼容源码运行与 PyInstaller 单文件运行的资源路径。"""
+        base_path = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[2]))
+        return base_path / relative_path
     
     def save_processed_file(self, save_path: str) -> bool:
         """实现抽象方法：保存处理结果"""
@@ -82,37 +83,42 @@ class InstrumentAutomationProcessor(BaseProcessor):
         # ✅ 现在才能用 logger
         self.logger.info("日志系统已启动")
 
-    def load_csv(self) -> pd.DataFrame:
-        try:
-            encodings = ['utf-8', 'gbk']
+    def load_file(self) -> pd.DataFrame:
+        """读取 CSV/XLSX；CSV 自动识别常见的中文文件编码。"""
+        file_path = Path(self.input_file)
+        suffix = file_path.suffix.lower()
 
-            for enc in encodings:
+        try:
+            if suffix == '.xlsx':
+                df = pd.read_excel(file_path, engine='openpyxl')
+                self.logger.info(f"✅ 成功加载 Excel 文件: {file_path}")
+                return df
+
+            if suffix != '.csv':
+                raise ValueError(f"不支持的文件格式: {suffix}，请选择 CSV 或 XLSX 文件")
+
+            decode_errors = []
+            for encoding in ('utf-8-sig', 'utf-8', 'gb18030', 'gbk'):
                 try:
-                    df = pd.read_csv(self.input_file, encoding=enc)
-                    print(f"✅ 成功使用编码: {enc}")
-                    break  # 成功就读取并退出循环
-                except UnicodeDecodeError as e:
-                    print(f"❌ {enc} 解码失败: {e}")
-                    continue
-            else:
-                # 所有编码都失败
-                raise ValueError("❌ 所有编码都无法解析该文件，请检查文件格式或编码")
-            self.logger.info(f"✅ 成功加载CSV文件: {self.input_file}")
-            return df
-        except Exception as e:
-            self.logger.error(f"❌ 文件加载失败: {str(e)}")
+                    df = pd.read_csv(file_path, encoding=encoding)
+                    self.logger.info(
+                        f"✅ 成功加载 CSV 文件: {file_path}，编码: {encoding}"
+                    )
+                    return df
+                except UnicodeDecodeError as error:
+                    decode_errors.append(f"{encoding}: {error}")
+
+            raise UnicodeError(
+                "无法识别 CSV 编码，已尝试 utf-8-sig、utf-8、gb18030、gbk。"
+                + " | ".join(decode_errors)
+            )
+        except Exception as error:
+            self.logger.error(f"❌ 文件加载失败: {error}")
             raise
 
-    def resource_path(self, relative_path):
-        """ 获取资源的绝对路径，支持开发环境和 PyInstaller 打包 """
-        try:
-            # PyInstaller 打包后的临时路径
-            base_path = sys._MEIPASS
-        except AttributeError:
-            # 开发环境下：使用当前脚本所在目录的父目录（即项目根目录）
-            # 假设该方法定义在 ui/ 目录下的某个类中
-            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_path, relative_path)
+    def load_csv(self) -> pd.DataFrame:
+        """保留旧调用入口，统一交给自动编码读取。"""
+        return self.load_file()
         
     def extract_chinese(self,text) -> str:
         # 提取所有中文字符
@@ -129,9 +135,19 @@ class InstrumentAutomationProcessor(BaseProcessor):
             self.logger.info(f"已排序，共 {len(self.df_sort)} 行数据")
 
             # 初始化列（防止 KeyError）
-            for col in ["名称", "量程", "表壳材质", "仪表材质", "探杆长度", "安装方式", "仪表类型","线缆长度"]:
+            column_defaults = {
+                "名称": "编码错误",
+                "量程": "编码错误",
+                "表壳材质": "编码错误",
+                "仪表材质": "编码错误",
+                "探杆长度": 0,
+                "安装方式": "编码错误",
+                "仪表类型": "编码错误",
+                "线缆长度": "编码错误",
+            }
+            for col, default in column_defaults.items():
                 if col not in self.df_sort.columns:
-                    self.df_sort[col] = "编码错误"
+                    self.df_sort[col] = default
 
             # 量程映射
             range_mapping_rules = {
@@ -154,29 +170,34 @@ class InstrumentAutomationProcessor(BaseProcessor):
                     range_mapped                     # 使用映射编码
                 ),
                 index=self.df_sort.index
-            ).replace("nan", "错误")  # 处理可能的 'nan' 字符串
-            range_val = pd.Series(range_val, index=self.df_sort.index).replace("nan", "错误")
+            ).replace("nan", "ERR")  # 处理可能的 'nan' 字符串
+            range_val = range_val_series
             
             # 材质映射
             material_mapping = {
                 "304": "SS", "316L": "SS1", "TA2": "Ti", "Ta": "Ta",
-                "HC": "HC", "2205": "SS2", "压铸铝": "C", "编码错误": "ERR","UPVC":"UPVC","TAN":"Ta"
+                "HC": "HC", "2205": "SS2", "压铸铝": "C", "编码错误": "ERR"
             }
-            self.shell_material = self.df_sort["表壳材质"].fillna("编码错误").map(material_mapping).fillna("错误")
-            self.material_value = self.df_sort["仪表材质"].fillna("编码错误").map(material_mapping).fillna("错误")
+            self.shell_material = self.df_sort["表壳材质"].fillna("编码错误").map(material_mapping).fillna("ERR")
+            self.material_value = self.df_sort["仪表材质"].fillna("编码错误").map(material_mapping).fillna("ERR")
 
             # 其他字段
-            probe = self.df_sort["探杆长度"].fillna("0").astype(int) if "探杆长度" in self.df_sort.columns else " "
+            probe = (
+                pd.to_numeric(self.df_sort["探杆长度"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
             install_type = self.df_sort["安装方式"].fillna("编码错误").astype(str) if "安装方式" in self.df_sort.columns else " "
             long = self.df_sort["线缆长度"].fillna("编码错误").astype(str) if "线缆长度" in self.df_sort.columns else " "
 
             def get_param_text(medium):
                 if medium in medium_map:
                     # 按中文分号拆分，去掉空，再用 \n 连接
-                    parts = [p.strip() for p in medium_map[medium].split("；") if p.strip()] 
+                    parts = [p.strip() for p in medium_map[medium].split("；") if p.strip()]
                     return "\n".join(parts)  # ✅ 用换行符连接，存入一个格子
                 else:
                     return "无"
+
             parameter_ins = {
                 "压力表": "（*）. 精度：1.0%FS；\n（*）. 防护等级：IP65；\n（*）. 安装方式：径向直接式",
                 "压力变送器": "（*）.精度：0.5%FS；\n（*）.输出信号：4-20mA；\n（*）.电压：两线制；\n（*）.通讯协议：无；\n（*）.现场显示：一体式多功能LCD显示表；\n（*）.防护等级：IP65；\n（*）.防爆等级：无；\n（*）.电气密封接口：M20*1.5；\n（*）.安装方式：螺纹；",
@@ -188,8 +209,7 @@ class InstrumentAutomationProcessor(BaseProcessor):
                 "热式流量计":"（*）.精度：1.0级；\n（*）.输出信号：DC24V，4-20mA；\n（*）.电压：四线制；\n（*）.通讯协议：modbus485；\n（*）.现场显示：一体式多功能LCD显示表；\n（*）.防护等级：IP65；\n（*）.防爆等级：无；\n（*）.电气密封接口：M20*1.5；",
                 "温度变送器":"（*）.精度：0.5%FS；\n（*）.输出信号：4-20mA；\n（*）.电压：DC24V,两线制；\n（*）.通讯协议：/；\n（*）.现场显示：无；\n（*）.防护等级：IP65；\n（*）.防爆等级：/；\n（*）.电气密封接口：M20*1.5；\n（*）.保护管类型：螺纹式直型保护管；\n（*）.保护管直径：φ12；\n（*）.备注：配聚四氟乙烯垫片1个；\n（*）.安装/接管方式：固定G1/2外螺纹,PN10；",
                 "双金属温度计":"（*）.精度：1.0%FS；\n（*）.现场显示：表盘直径φ100，表头填充硅油；\n（*）.防护等级：IP65；\n（*）.形式：耐震，万向型\n（*）.安装方式：轴向安装\n（*）.鞘直径：6mm；\n（*）.鞘安装接头：G1/2外螺纹，PN10；\n（*）.保护管类型：螺纹式直型保护管；\n（*）.保护管直径：φ12；\n（*）.保护管与鞘连接：G1/2内螺纹，PN10；\n（*）.安装/接管方式：固定G1/2外螺纹；",
-                "分析仪表":"（*）.输出信号：4-20mA；\n（*）.电压：DC24V，两线制；\n（*）.通讯协议：RS485；\n（*）.现场显示：一体式多功能LCD显示表；\n（*）.防护等级：IP65；\n（*）.防爆等级：无；\n（*）.电气密封接口：2-M20*1.5；",
-                "法兰浮子流量计":""
+                "分析仪表":"（*）.输出信号：4-20mA；\n（*）.电压：DC24V，两线制；\n（*）.通讯协议：RS485；\n（*）.线长：20m；\n（*）.现场显示：一体式多功能LCD显示表；\n（*）.防护等级：IP65；\n（*）.防爆等级：无；\n（*）.电气密封接口：2-M20*1.5；",
                 }
 
             self.df_sort['参数2'] = self.df_sort['名称'].apply(lambda x: self.extract_chinese(x)).map(parameter_ins)
@@ -203,14 +223,15 @@ class InstrumentAutomationProcessor(BaseProcessor):
 
             # 生成 SKU
             sku_list = []
-            mediumn_path = self.resource_path("dataset\\medium.xlsx")
-            medium_df =  pd.read_excel(mediumn_path, engine='openpyxl')
+            medium_df = pd.read_excel(
+                self.resource_path("dataset/medium.xlsx"),
+                engine='openpyxl',
+            )
             medium_df.dropna(subset=['介质', '参数'], inplace=True)
             medium_map = dict(zip(medium_df["介质"], medium_df["参数"]))
-            self.df_sort["参数1"] = self.df_sort["介质"].apply(get_param_text) if "介质" in self.df_sort.columns else "无"    
+            self.df_sort["参数1"] = self.df_sort["介质"].apply(get_param_text)
+            self.df_sort['参数'] = self.df_sort['参数1'].astype(str) + "\n" + self.df_sort['参数2'].astype(str)
             for idx in self.df_sort.index:
-                param1_val = str(self.df_sort.loc[idx, '参数1'])
-                param2_val = str(self.df_sort.loc[idx, '参数2'])
                 self.ins_name =  self.extract_chinese(str(self.df_sort.loc[idx, "名称"])).strip()
                 range_val_str = str(self.df_sort.loc[idx, "量程"])
                 key = (self.ins_name,range_val_str)
@@ -230,202 +251,136 @@ class InstrumentAutomationProcessor(BaseProcessor):
                 material_value = self.df_sort.loc[idx,'仪表材质']
                 
                 try:
+                    appen_text = ""  # 初始化 appen_text 为空字符串
                     if self.ins_name == "双金属温度计":
                         sku = f"WSS-AOA{self.r_val}{self.shell_mat}-12{mat_val}{self.prob}-LWG1/2"
+                        appen_text = f"\n（*）.保护管长度：{self.prob}mm；\n（*）.量程：{range_val_str}℃；"
                         self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：{shell_value}；\n（*）.保护管材质：{material_value}（含接头）"
-                        self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}℃；\n（*）.保护管长度：{self.prob}mm；\n{param2_val}"
                     elif self.ins_name == "温度变送器":
                         sku = f"SWBZ-A0-24D2NNA0P{self.r_val}0-12{mat_val}{self.prob}-LWG1/2"
+                        appen_text = f"\n（*）.保护管长度：{self.prob}mm；\n（*）.量程：{range_val_str}℃；"
                         self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.保护管材质：{material_value}（含接头）"
-                        self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}℃；\n（*）.保护管长度：{self.prob}mm；\n{param2_val}"
                     elif self.ins_name == "压力表":
                         inst_type = self.df_sort.loc[idx, "仪表类型"]
                         if str(inst_type) == "耐震":
                             sku = f"YTHN-A1A{self.r_val}{self.shell_mat}-{mat_val}-LWG1/2W"
+                            appen_text = f"\n（*）.形式：普通型耐震；\n（*）.现场显示：表盘直径φ100，表头填充硅油；\n（*）.量程：{range_val_str}MPa（G）；\n（*）.安装/接管方式：固定G1/2外螺纹,PN10；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：{shell_value}；\n（*）.接液材质：{material_value}"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}MPa（G）；\n（*）.形式：普通型耐震；\n（*）.现场显示：表盘直径φ100，表头填充 silicone；\n{param2_val}\n（*）.安装/接管方式：固定G1/2外螺纹,PN10；"
                         elif str(inst_type) == "耐震隔膜":
                             if mat_val == "PP":
                                 sku = f"YMN-A1A{self.r_val}PP-PP-LWG1/2N"
+                                appen_text = f"\n（*）.现场显示：表盘直径φ60，表头填充 silicone；\n（*）.量程：{range_val_str}MPa（G）；\n（*）.形式：耐震隔膜型；\n（*）.安装/接管方式：固定G1/2内螺纹,PN10；"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：{shell_value}；\n（*）.膜片材质：{material_value}"
-                                self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}MPa（G）；\n（*）.现场显示：表盘直径φ60，表头填充 silicone；\n（*）.形式：耐震隔膜型；\n{param2_val}\n（*）.安装/接管方式：固定G1/2内螺纹,PN10；"
-
                             else:
                                     sku = f"YMN-A1A{self.r_val}{self.shell_mat}-{mat_val}-FL120RF1.0"
+                                    appen_text = f"\n（*）.现场显示：表盘直径φ60，表头填充 silicone；\n（*）.量程：{range_val_str}MPa（G）；\n（*）.形式：耐震隔膜型；\n（*）.安装/接管方式：法兰连接，DN20,PN10"
                                     self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：{shell_value}；\n（*）.膜片材质：{material_value}"
-                                    self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}MPa（G）；\n（*）.形式：耐震隔膜型；\n（*）.现场显示：表盘直径φ60，表头填充 silicone；\n{param2_val}\n（*）.安装/接管方式：法兰连接，DN20,PN10"
                     elif self.ins_name == "压力变送器":
                         if self.r_val in ["0~0.25", "B"]:
                             sku = f"PT-H-B-1-{mat_val}-50-NSR"
+                            appen_text = f"\n（*）.量程：{range_val_str}MPa（G）；\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}MPa（G）；\n{param2_val}\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
                         else:
                             sku = f"PT-H-{self.r_val}-1-{mat_val}-G1/2-NSR"
+                            appen_text = f"\n（*）.量程：{range_val_str}MPa（G）；\n（*）.安装/接管方式：固定G1/2外螺纹,PN10；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{range_val_str}MPa（G）；\n{param2_val}\n（*）.安装/接管方式：固定G1/2外螺纹,PN10；"
                     elif self.ins_name == "电磁流量计":
-                        diameter_dianci = {
-                            "DN15":"0.32~1.27",
-                            "DN20":"0.57~2.26",
-                            "DN25":"0.88~3.53",
-                            "DN32":"1.45~5.79",
-                            "DN40":"2.3~9.0",
-                            "DN50":"3.5~14.1",
-                            "DN65":"6.0~23.9",
-                            "DN80":"9~36.2",
-                            "DN100":"14.1~56.5",
-                            "DN125":"22.1~88.4",
-                            "DN150":"31.8~127",
-                            "DN200":"56.5~226"
-                        }
-                        diameter1 = diameter_dianci.get(self.install_val, "未知")
                         sku = f"EMF-1C-0-A{mat_val}CS-FL{self.install_val.split('DN')[-1]}RF1.0"
+                        appen_text = f"\n（*）.介质流量：{range_val_str}m³/h；\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型；"
                         self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.电极材质：{material_value}；\n（*）.接液材质：PTFE；\n（*）.法兰材质：碳钢"
-                        self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{diameter1}m³/h；\n{param2_val}\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型"
                     elif self.ins_name == "热式流量计":
-                        diameter_reshi = {
-                            "DN15":"0.65~65",
-                            "DN25":"1.75~175",
-                            "DN32":"2.9~290",
-                            "DN40":"4.5~450",
-                            "DN50":"7~700",
-                            "DN65":"12~1200",
-                            "DN80":"18~1800",
-                            "DN100":"28~2800",
-                            "DN125":"44~4400",
-                            "DN150":"63~6300",
-                            "DN200":"100~1000"
-                        }
-                        diameter2 = diameter_reshi.get(self.install_val, "未知")
-                        if int(self.install_val.split('DN')[-1]) <= 80:
-                            sku = f"TFC-A{diameter2.split('~')[-1]}-FL{self.install_val.split('DN')[-1]}"
+                        dn_match = re.search(r"DN\s*(\d+)", self.install_val, re.IGNORECASE)
+                        dn_number = int(dn_match.group(1)) if dn_match else None
+                        if dn_number is not None and dn_number <= 80:
+                            sku = f"TFC-A{self.r_val.replace('-','~').split('~')[-1]}-FL{self.install_val.split('DN')[-1]}"
+                            appen_text = f"\n（*）.介质流量：{range_val_str}m³/h；\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：304"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{diameter2}m³/h；\n{param2_val}\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型；"
                         else:
-                            sku = f"TFC-A{diameter2.split('~')[-1]}-LWG1/2-{self.install_val.split('DN')[-1]}"
+                            sku = f"TFC-A{self.r_val.replace('-','~').split('~')[-1]}-LWG1/2-{self.install_val.split('DN')[-1]}"
+                            appen_text = f"\n（*）.介质流量：{range_val_str}m³/h；\n（*）.安装/接管方式：固定G1/2外螺纹；管道规格：{self.install_val}；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.螺纹材质：304"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{diameter2}m³/h；\n{param2_val}\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型；"
-                    elif self.ins_name == "法兰浮子流量计":
-                        if "DN" in self.install_val:
-                            # 提取 DN 后的数字，比如 DN50 -> 50
-                            try:
-                                dn_size = self.install_val.split('DN')[-1].strip()
-                                # 进一步提取数字（防止有单位）
-                                dn_number = re.search(r'\d+', dn_size)
-                                dn_display = dn_number.group() if dn_number else dn_size
-                            except:
-                                dn_display = "XX"
-
-                            sku = f"FF-{mat_val}-{self.r_val.replace('-','~').split('~')[-1]}-FL{dn_display}"
-                            self.df_sort.loc[idx, '材质'] = f"（*）.材质：{material_value}"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{self.r_val}m³/h；\n（*）.法兰DN{dn_display}，PN10 HG/T-20592-2009，RF，B型；"
+                    elif self.ins_name == "浮子流量计":
+                        if any("DN" in item for item in self.install_val):
+                            sku = f"FF-{mat_val}-{self.r_val.replace('-','~').split('~')[-1]}-FL{self.install_val.split('DN')[-1]}"
+                            appen_text = f"\n（*）.介质流量：{range_val_str}m³/h；\n（*）.法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型；"
+                            self.df_sort.loc[idx,'材质'] = f"（*）.材质：UPVC"
                         else:
-                            # 如果没有 DN，说明是承插焊
-                            # 你可以选择提取数字，或直接用文本
-                            try:
-                                size_match = re.search(r'\d+', self.install_val)
-                                size_display = size_match.group() if size_match else "XX"
-                            except:
-                                size_display = "XX"
-
-                            sku = f"FF-{mat_val}-{self.r_val.replace('-','~').split('~')[-1]}-CC{size_display}"
-                            self.df_sort.loc[idx, '材质'] = f"（*）.材质：{material_value}"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{self.r_val}m³/h；\n{param2_val}\n（*）.安装/接管方式：承插{size_display}；"
+                            sku = f"FF-{mat_val}-{self.r_val.replace('-','~').split('~')[-1]}-CC{self.install_val.split('DN')[-1]}"
+                            appen_text = f"\n（*）.介质流量：{range_val_str}m³/h；\n（*）.安装/接管方式：承插{self.install_val}；"
+                            self.df_sort.loc[idx,'材质'] = f"（*）.材质：UPVC"
                     elif self.ins_name =="涡街流量计":
-                        diamter_wojie = {
-                            "DN15":"4~28",
-                            "DN20":"6~40",
-                            "DN25":"8~50",
-                            "DN32":"13~130",
-                            "DN40":"25~180",
-                            "DN50":"35~300",
-                            "DN65":"50~500",
-                            "DN80":"80~800",
-                            "DN100":"120~1200",
-                            "DN125":"180~1800",
-                            "DN150":"320~2800",
-                            "DN200":"560~6000"
-                        }
-                        sku =  f"VF-1C-{mat_val}{mat_val}-FL{self.install_val.split('DN')[-1]}RF1.0"
-                        diameter3 = diamter_wojie.get(self.install_val, "未知")
+                        sku =  f"VF-1C-{mat_val}{mat_val}-FL{self.install_val.split('DN')[-1]}RF1.6"
+                        appen_text = f"\n（*）.介质流量：{range_val_str}m³/h；\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}，PN10 HG/T-20592-2009，RF，B型；"
                         self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：{material_value}"
-                        self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.介质流量：{diameter3}m³/h；\n{param2_val}\n（*）.安装/接管方式：法兰DN{self.install_val.split('DN')[-1]}"
                     elif self.ins_name == "法兰液位仪表":
-                        if (self.df_sort.loc[idx, "仪表类型"] == "磁翻板") or (self.df_sort.loc[idx, "仪表形式"] == "磁翻板"):
+                        if self.df_sort.loc[idx,"仪表类型"] == "磁翻板":
                             if "KP" in install_type:
                                 sku = f"LG-FQC-{self.r_val.replace('-','~').split('~')[-1]}-{mat_val}{mat_val}-KP50"
+                                appen_text = f"\n（*）.量程：{range_val_str}mm；\n（*）.变送器位置:液位计上方；\n（*）.安装/接管方式：卡盘直径50.5；"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：{material_value}"
-                                self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n{param2_val}\n（*）.安装/接管方式：卡盘直径50.5；"
                             else:
-                                sku = f"LG-FQC-{self.r_val.replace('-','~').split('~')[-1]}-{mat_val}{mat_val}-FL25RF1.0"
+                                sku = f"LG-FQC-{self.r_val.replace('-','~').split('~')[-1]}-{mat_val}{mat_val}-FL25RF1.6"
+                                appen_text = f"\n（*）.量程：{range_val_str}mm；\n（*）.变送器位置:液位计上方；\n（*）.安装/接管方式：法兰DN25，PN16 HG/T-20592-2009，RF，B型；"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：{material_value}"
-                                self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n{param2_val}\n（*）.安装/接管方式：卡盘直径50.5；"
-                        elif (self.df_sort.loc[idx, "仪表类型"] == "单法兰") or (self.df_sort.loc[idx, "仪表形式"] == "单法兰"):
-                            sku = f"LG-DFC-{self.r_val.replace('-','~').split('~')[-1]}-SS{mat_val}-FL50RF1.0"
+                        elif self.df_sort.loc[idx,"仪表类型"] == "单法兰":
+                            sku = f"LG-DFC-{self.r_val.replace('-','~').split('~')[-1]}-SS{mat_val}-FL50RF1.6"
+                            appen_text = f"\n（*）.量程：{range_val_str}mm；\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：304"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n{param2_val}\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
-                        elif (self.df_sort.loc[idx, "仪表类型"] == "双法兰") or (self.df_sort.loc[idx, "仪表形式"] == "双法兰"):
-                            sku = f"LG-SFC-{self.r_val.replace('-','~').split('~')[-1]}-SS{mat_val}-FL50RF1.0"
+                        elif self.df_sort.loc[idx,"仪表类型"] == "双法兰":
+                            sku = f"LG-SFC-{self.r_val.replace('-','~').split('~')[-1]}-SS{mat_val}-FL50RF1.6"
+                            appen_text = f"\n（*）.现场显示：LCD显示，带调零功能；\n（*）.量程：{range_val_str}mm；\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}；\n（*）.法兰材质：304"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n（*）.现场显示：LCD显示，带调零功能；\n{param2_val}\n（*）.安装/接管方式：法兰DN50，PN10 HG/T-20592-2009，RF，B型；"
                     elif self.ins_name == "投入液位仪表":
                         sku = f"LG-TRC-{self.r_val.replace('-','~').split('~')[-1]}-{mat_val}-{mat_val}-TR"
+                        appen_text = f"\n（*）.量程：{range_val_str}mm；\n（*）.安装/接管方式：投入式；"
                         self.df_sort.loc[idx,'材质'] = f"（*）.表壳材质：压铸铝；\n（*）.接液材质：{material_value}"
-                        self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：{self.r_val}mm；\n{param2_val}\n（*）.安装/接管方式：投入式；"
                     elif self.ins_name == "液位计开关":
                         sku = f"CFBS-{self.long_val}-PP-0-0"
+                        appen_text = f"\n（*）.线缆长度{self.long_val}m；"
                         self.df_sort.loc[idx,'材质'] = f"（*）.接液材质：{material_value}"
-                        self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.线缆长度{self.long_val}；\n{param2_val}\n（*）.安装/接管方式：投入式；"
                     elif self.ins_name == "分析仪表":
                         if self.df_sort.loc[idx,"仪表类型"] == "Ω":
-                            if re.search(r'\b2000\b',self.r_val):
+                            range_val_str = str(range_val.loc[idx],"量程")
+                            if "2000" in range_val_str:
                                 sku = f"EC-W1-A1/2000-SS1-LWG1/2"
+                                appen_text = f"\n（*）.精度：0.5%FS；\n（*）.量程：1-2000us/cm，k=1；\n（*）.线长：20m；\n（*）.安装/接管方式：固定G1/2外螺纹；"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.接液材质：{material_value}"
-                                self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：1-2000us/cm，k=1；\n（*）.精度：0.5%FS；\n（*）.线长：{self.long_val}\n{param2_val}\n（*）.安装/接管方式：固定G1/2外螺纹；"
-                            elif re.search(r'\b20000\b',self.r_val):
+                            elif "20000" in range_val_str:
                                 sku = f"EC-W1-A10/20000-SS1-LWG1/2"
+                                appen_text = f"\n（*）.精度：0.5%FS；\n（*）.量程：10-20000us/cm，k=10；\n（*）.线长：20m；\n（*）.安装/接管方式：固定G1/2外螺纹；"
                                 self.df_sort.loc[idx,'材质'] = f"（*）.接液材质：{material_value}"
-                                self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：10-20000us/cm，k=10；\n（*）.线长：{self.long_val}\n（*）.精度：0.5%FS；\n{param2_val}\n（*）.安装/接管方式：固定G1/2外螺纹；"
-                            elif re.search(r'\b30000\b',self.r_val):
-                                sku = f"EC-W1-A10/600000-SS1-LWG1/2"
-                                self.df_sort.loc[idx,'材质'] = f"（*）.接液材质：聚砜"
-                                self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：30000~600000us/cm，k=30；\n（*）.精度：0.5%FS；\n（*）.线长：{self.long_val}\n{param2_val}\n（*）.安装/接管方式：固定G3/4螺纹；"
                             else:
                                 sku = "编码失败"
                         elif self.df_sort.loc[idx,"仪表类型"] == "PH":
                             sku = f"PH-0-DC24VA/14-GL-LWG3/4"
+                            appen_text = f"\n（*）.量程：0-14；\n（*）.精度：±0.01；\n（*）.安装/接管方式：带支架，G3/4螺纹；"
                             self.df_sort.loc[idx,'材质'] = f"（*）.接液材质：玻璃"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：0-14；\n（*）.精度：±0.01；\n（*）.线长：{self.long_val}\n{param2_val}\n（*）.安装/接管方式：带支架，G3/4螺纹；"
                         elif self.df_sort.loc[idx,"仪表类型"] == "DO":
                             sku = f"DO-0-A/020-SS1-JM"
-                            self.df_sort.loc[idx,'材质'] = f"（*）.保护管材质：PP；\n（*）.接液材质：316L；"
-                            self.df_sort.loc[idx,'参数'] = f"{param1_val}\n（*）.量程：0-20mg/L；\n（*）.精度：±0.5%FS；（*）.线长：{self.long_val}；\n{param2_val}\n（*）.安装/接管方式：浸没；"
+                            appen_text = f"\n（*）.精度：0.5%FS；\n（*）.电缆长度：10m；\n（*）.安装/接管方式：投入式；"
+                            self.df_sort.loc[idx,'材质'] = f"（*）.保护管材质：PP；\n（*）.接液材质：316L"
                     else:
                         sku = f"无编码"
                         self.df_sort.loc[idx,"参数"] = f"\n无编码；"
                         self.df_sort.loc[idx,'材质'] = f"无编码"
                     sku_list.append(sku)
-
+                    self.df_sort.loc[idx, '参数'] += appen_text
                 except Exception as e:
-                    sku = f"错误_{idx}"
+                    sku = f"ERROR_{idx}"
                     sku_list.append(sku)
                     self.logger.error(f"行 {idx} 生成失败: {e}")
-            self.df_sort['*SKU编号'] = sku_list
-            self.df_sort['*申购单类型'] = '阀门仪表-仪表'
+            self.df_sort['SKU编码'] = sku_list
             self.logger.info("✅ SKU 生成完成！")
             return self.df_sort
         except Exception as e:
             self.logger.error(f"❌ 生成 SKU 时出错: {str(e)}")
             raise
     
-    def set_metadata(self, applicant, date, project_number):
-        """设置申购人、日期、项目号等元数据"""
+    def set_metadata(self, project_number):
+        """设置项目号元数据。"""
         if self.df_sort is not None:
-            self.df_sort['申购人'] = applicant
-            self.df_sort['申购日期'] = date
             self.df_sort['项目号'] = project_number
             self.df_sort['所属项目'] = project_number
-            self.df_sort['申购单类型'] = '阀门仪表-仪表'
         else:
             raise ValueError("df_sort 未初始化，请先加载数据")
     
@@ -445,13 +400,9 @@ class InstrumentAutomationProcessor(BaseProcessor):
         try:
             # ✅ 安全转换为字符串，处理 NaN
             project_num = df['项目号'].fillna('').astype(str)
-            ins_name = df['仪表名称'].fillna('').astype(str)
-            weihao = df['仪表位号'].fillna('').astype(str)           
+            ins_name = df['仪表名称'].fillna('').astype(str)           
             # 确保字符串连接时有空格分隔
-            df['备注'] = project_num.str.strip()+ ins_name.str.strip()+ weihao.str.strip()
-            now = datetime.datetime.now().strftime("%Y%m%d")
-            df['申购单备注'] = "【" + df['项目号'].astype(str) + "】仪表申购单-" + now
-            
+            df['备注'] = project_num.str.strip()+ ins_name.str.strip()
             # ✅ 检查备注列是否成功创建
             if '备注' not in df.columns:
                 raise ValueError("备注列未成功创建")
@@ -463,84 +414,65 @@ class InstrumentAutomationProcessor(BaseProcessor):
             error_msg = f"❌ 生成备注列时发生未知错误: {e}"
             self.logger.error(error_msg)
             raise
-    
-
     def merge_by_SKU(self):
         self.df_sort['备注'] = self.df_sort['备注'].fillna('')
         aggregation = {
-            '项目号': 'first',
             '仪表类型': 'first',
             '参数': 'first',
             '材质': 'first',
-            '申购单备注': 'first',
             '备注': lambda x:'\n'.join(item for item in x if item.strip() != ''),
-            '申购人': 'first',
-            '申购日期': 'first',
-            '*申购单类型': 'first'
         }
-        cols_needed = list(aggregation.keys())
-        df_clean = self.df_sort[['*SKU编号'] + cols_needed].copy()
-        self.df_group = df_clean.groupby('*SKU编号', as_index=False).agg(aggregation)
-        self.df_group['*申请数量'] = self.df_sort.groupby('*SKU编号').size().values
-        self.df_group['所属项目'] = self.df_group['项目号']
-        self.df_group = self.df_group.rename(columns={'项目号': '项目编号',
-                                                      '申购日期': '需求日期',
-                                                      '仪表类型':'产品名称'
-                                                      })
-        template_path = self.resource_path("dataset/申购单导入模板.xlsx")
-        template_df =  pd.read_excel(template_path, engine='openpyxl',header = 1)
-        template_columns = [str(col).strip().replace('\n', '').replace('\r', '') for col in template_df.columns]
-        for col in template_columns:
-            if col not in self.df_group.columns:
-                self.df_group[col] = ''
+        self.df_group = self.df_sort.groupby('SKU编码').agg(aggregation).reset_index()
+        self.df_group['*申请数量'] = self.df_sort.groupby('SKU编码').size().values
+        self.df_group = self.df_group.rename(columns={
+            'SKU编码': '*SKU编号',
+            '仪表类型': '产品名称',
+        })
+        output_columns = [
+            '*SKU编号',
+            '产品名称',
+            '参数',
+            '材质',
+            '*申请数量',
+            '备注',
+        ]
+        self.df_output = self.df_group[output_columns].reset_index(drop=True)
 
-        self.df_output = self.df_group[template_columns].reset_index(drop=True)  # ✅ 关键！
-        mapping = {
-            'V': '涡街流量计',
-            'E': '电磁流量计',
-            'F': '浮子流量计',
-            'Ω':'电导率仪',
-            'PH':'pH计',
-            '耐震':'耐震压力表',
-            '耐震隔膜':'耐震隔膜压力表',
-            '磁翻板':'磁翻板液位计',
-            '双法兰':'双法兰液位计',
-            '单法兰':'单法兰液位计',
-            'DO':'溶氧仪'
-            }
-        self.df_output['产品名称'] = self.df_output['产品名称'].replace(mapping) 
-        template_path = self.resource_path("dataset/申购单导入模板.xlsx")
-        book = load_workbook(template_path)
+        book = Workbook()
         sheet = book.active
-        start_row = 3
-        for row_idx,row in self.df_output.iterrows():
-            for c_idx,value in enumerate(row,1):
-                cell = sheet.cell(row = start_row + row_idx, column = c_idx,value = value)
-                cell.alignment = Alignment(
-                    wrap_text=True,           # 自动换行
-                    vertical='center',        # 垂直居中
-                    horizontal='center'       # 水平居中（可选）
+        sheet.title = "仪表"
+
+        for column_index, column_name in enumerate(self.df_output.columns, start=1):
+            cell = sheet.cell(row=1, column=column_index, value=column_name)
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+        for row_index, row in enumerate(
+            self.df_output.itertuples(index=False, name=None),
+            start=2,
+        ):
+            for column_index, value in enumerate(row, start=1):
+                cell = sheet.cell(
+                    row=row_index,
+                    column=column_index,
+                    value='' if pd.isna(value) else value,
                 )
-                if c_idx == sheet.max_column:  # 如果是最后一列，设置自动换行
-                    cell.alignment = Alignment(wrap_text=True)
-        self.logger.info(f"✅ 已生成申购单")
+                cell.alignment = Alignment(vertical='top', wrap_text=True)
+
         self.book = book
-        return book  
+        self.logger.info(f"✅ 按SKU合并完成，数据形状: {self.df_group.shape}")
+        return book
 
 
 
-    def process(self, applicant, date, project_number):
+    def process(self, project_number):
         try:
-            # 1. 生成SKU编码 
+            # 1. 生成SKU编码
             self.df_sort = self.generate_code()
             if self.df_sort is None:
                 raise ValueError("SKU编码生成失败，df_sort 为空")
             self.logger.info(f"✅ 生成SKU编码完成，数据形状: {self.df_sort.shape}")
             
             # 2. 设置元数据
-            self.df_sort['申购人'] = applicant
-            self.df_sort['申购日期'] = date
-            self.df_sort['*申购单类型'] = '阀门仪表-仪表'
             # 确保项目号列存在并设置值
             if '项目号' not in self.df_sort.columns:
                 self.df_sort['项目号'] = ''
@@ -555,7 +487,7 @@ class InstrumentAutomationProcessor(BaseProcessor):
             self.df_sort = self.get_note(df=self.df_sort)
             if '备注' not in self.df_sort.columns:
                 raise ValueError("备注列生成失败")
-            self.merge_by_SKU()
+            self.df_output = self.merge_by_SKU()
             
             self.logger.info("✅ 文件处理完成")
             return True

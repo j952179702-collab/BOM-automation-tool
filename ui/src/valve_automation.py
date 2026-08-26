@@ -17,7 +17,7 @@ import datetime
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 import sys
-from ValveMatch import ValveProtocolMatcher,ParameterFiller
+from src.ValveMatch import ValveProtocolMatcher,ParameterFiller
 
 # ====================== QTextEditLogger ======================
 class QTextEditLogger(logging.Handler):
@@ -78,25 +78,50 @@ class ValveAutomationProcess(BaseProcessor):
         # ✅ 现在才能用 logger
         self.logger.info("日志系统已启动")
 
-    def load_csv(self) -> pd.DataFrame:
+    def load_file(self) -> pd.DataFrame:
         try:
-            encodings = ['utf-8', 'gbk']
+            file_path = Path(self.input_file)
+            suffix = file_path.suffix.lower()
 
-            for enc in encodings:
-                try:
-                    df = pd.read_csv(self.input_file, encoding=enc)
-                    print(f"✅ 成功使用编码: {enc}")
-                    break  # 成功就读取并退出循环
-                except UnicodeDecodeError as e:
-                    print(f"❌ {enc} 解码失败: {e}")
-                    continue
+            # 读取 CSV
+            if suffix == ".csv":
+                encodings = ["utf-8-sig", "utf-8", "gbk"]
+
+                for enc in encodings:
+                    try:
+                        df = pd.read_csv(file_path, encoding=enc)
+
+                        self.logger.info(
+                            f"✅ 成功加载 CSV 文件：{file_path}，编码：{enc}"
+                        )
+                        return df
+
+                    except UnicodeDecodeError as e:
+                        self.logger.warning(
+                            f"❌ 使用 {enc} 解码失败：{e}"
+                        )
+
+                raise ValueError(
+                    "所有编码均无法解析该 CSV 文件，请检查文件编码"
+                )
+
+            # 读取 XLSX
+            elif suffix == ".xlsx":
+                df = pd.read_excel(file_path, engine="openpyxl")
+
+                self.logger.info(
+                    f"✅ 成功加载 Excel 文件：{file_path}"
+                )
+                return df
+
+            # 不支持的格式
             else:
-                # 所有编码都失败
-                raise ValueError("❌ 所有编码都无法解析该文件，请检查文件格式或编码")
-            self.logger.info(f"✅ 成功加载CSV文件: {self.input_file}")
-            return df
+                raise ValueError(
+                    f"不支持的文件格式：{suffix}，请选择 CSV 或 XLSX 文件"
+                )
+
         except Exception as e:
-            self.logger.error(f"❌ 文件加载失败: {str(e)}")
+            self.logger.error(f"❌ 文件加载失败：{e}")
             raise
 
     def resource_path(self, relative_path):
@@ -119,7 +144,7 @@ class ValveAutomationProcess(BaseProcessor):
     
     def generate_code(self):
         if self.df is None:
-            self.df = self.load_csv()
+            self.df = self.load_file()
         
         # 1. 初始排序（按第2列降序）
         # 建议：如果知道第2列的具体名称，最好用 by='列名'，比索引更安全
@@ -132,16 +157,16 @@ class ValveAutomationProcess(BaseProcessor):
             "闸阀": "G", "疏水阀": "S", "放料阀": "F", "减压阀": "TP",
             "针阀": "Z", "安全阀": "A" # 注意：去掉重复的减压阀TP，避免冲突
         }
-        valve_connect_rules = {"法兰": "0", "卡箍": "1", "焊接": "2", "螺纹": "3", "对夹": "4"}
+        valve_connect_rules = {"法兰": "0", "卡箍": "1", "焊接": "2", "螺纹": "3", "对夹": "4","活接":"5"}
         valve_seat_rules = {"EPDM": "X", "PTFE": "F", "硬密封": "Y"}
         valve_body_rules = {
             "304": "1E", "316L": "2E", "2205": "3E", "碳钢": "C",
+            "搪瓷": "2C", "UPVC": "2G", "TA2": "1T", "C-F": "1C","PPR":"1G"
+        }
+        valve_faban_rules = {
+            "304": "1E", "316L": "2E", "2205": "3E", "碳钢": "C",
             "搪瓷": "2C", "UPVC": "2G", "TA2": "1T", "C-F": "1C"
         }
-        screw_to_DN = {
-            "G1/2": "15", "G3/4": "20", "G1-1/4": "32", "G1-1/2": "40"
-        }
-
         # === 确保列存在 ===
         required_cols = ['阀门名称', '密封形式', '阀门规格', '阀门材质', '阀门形式', '阀板材质', '出口管径']
         for col in required_cols:
@@ -160,57 +185,63 @@ class ValveAutomationProcess(BaseProcessor):
                     return str(val).strip() if pd.notna(val) else ""
 
                 # 获取数据
-                valve_name = safe_get('阀门名称')
+                valve_name = safe_get('名称')
+                valve_name_sub = re.sub(r'^[A-Z]+\d+-\d+[A-Z]*\s*','',valve_name)
                 valve_spec = safe_get('阀门规格') 
                 valve_material1 = safe_get('阀门材质')
                 valve_type = safe_get('阀门形式')
                 valve_faban1 = safe_get('阀板材质')
                 sealing_type = safe_get('密封形式')
                 out_diameter = safe_get('出口管径')
-                valve_material = valve_material.replace({"C-F","碳钢衬F4"})
-                valve_faban = valve_faban1.replace({"C-F","碳钢衬F4"})
+                valve_material = valve_material1.replace("C-F","碳钢衬F4")
+                valve_faban = valve_faban1.replace("C-F","碳钢衬F4")
+                self.logger.info(f"处理行 {index}: 名称={valve_name}")
 
                 # 逻辑处理
                 match = re.search(r'\d+', valve_spec)
                 diameter = match.group() if match else "错误"
 
-                if "电动" in valve_type:
+                if "电动" in valve_name_sub:
                     drive_code = "1"
-                elif "气动" in valve_type:
+                elif "气动" in valve_name_sub:
                     drive_code = "2"
                 else:
                     drive_code = "0"
 
                 # 查找编码 (找不到则返回 "错误")
-                valve_type_code = next((code for key, code in valve_type_rules.items() if key in valve_type), "错误")
+                valve_type_code = next((code for key, code in valve_type_rules.items() if key in valve_name_sub), "错误")
                 sealing_code = next((code for key, code in valve_seat_rules.items() if key in sealing_type), "错误")
-                connect_code = next((code for key, code in valve_connect_rules.items() if key in valve_type), "错误")
+                connect_code = next((code for key, code in valve_connect_rules.items() if key in valve_name), "错误")
                 material_code = next((code for key, code in valve_body_rules.items() if key in valve_material), "错误")
+                faban_code = next((code for key, code in valve_faban_rules.items() if key in valve_faban), "错误")
 
                 # 生成 SKU
                 sku = ""
-                if "蝶阀" in valve_type:
+                if "蝶阀" in valve_name:
                     if "石墨铸铁" in valve_material:
-                        sku = f"{valve_type_code}{connect_code}{drive_code}{sealing_code}-{diameter}-1C/{valve_faban}"
+                        sku = f"{valve_type_code}{drive_code}{connect_code}{sealing_code}-{diameter}-1C/{faban_code}"
                         medium_code = f"(*).阀体：石墨铸铁；\n（*）.阀板：{valve_faban}；\n（*）.密封：{sealing_type}"
                     else:
-                        sku = f"{valve_type_code}{connect_code}{drive_code}{sealing_code}-{diameter}-{material_code}"
+                        sku = f"{valve_type_code}{drive_code}{connect_code}{sealing_code}-{diameter}-{faban_code}"
                         medium_code = f"(*).阀体：{valve_material}；\n（*）.阀板：{valve_faban}；\n（*）.密封：{sealing_type}"
-                elif "螺纹" in valve_type:
-                    d_screw = screw_to_DN.get(valve_spec, diameter) 
-                    sku = f"{valve_type_code}{connect_code}{drive_code}{sealing_code}-{d_screw}-{material_code}"
+                elif "螺纹" in valve_name:
+                    sku = f"{valve_type_code}{drive_code}{connect_code}{sealing_code}-{valve_spec}-{material_code}"
                     medium_code = f"(*).阀体：{valve_material}；\n（*）.阀芯：{valve_material}；\n（*）.密封：{sealing_type}"
-                elif "V形" in valve_type:
-                    sku = f"{valve_type_code}V{connect_code}{drive_code}{sealing_code}-{diameter}-{material_code}"
+                elif "V形" in valve_name:
+                    sku = f"{valve_type_code}V{drive_code}{connect_code}{sealing_code}-{diameter}-{material_code}"
                     medium_code = f"(*).阀体：{valve_material}；\n（*）.阀芯：{valve_material}；\n（*）.密封：{sealing_type}"
-                elif "上展" in valve_type or "减压阀" in valve_type:
-                    sku = f"{valve_type_code}{connect_code}{drive_code}{sealing_code}-{diameter}/{out_diameter}-{material_code}"
+                elif "上展" in valve_name or "减压阀" in valve_name:
+                    sku = f"{valve_type_code}{drive_code}{connect_code}{sealing_code}-{diameter}/{out_diameter}-{material_code}"
                     medium_code = f"（*）.过流材质：{valve_material}"
-                elif "止回阀" in valve_type:
-                    sku = f"{valve_type_code}{connect_code}{drive_code}{sealing_code}-{diameter}-{material_code}"
+                elif "止回阀" in valve_name:
+                    sku = f"{valve_type_code}{drive_code}{connect_code}{sealing_code}-{diameter}-{material_code}"
                     medium_code = f"（*）.阀体：{valve_material}；\n（*）.阀瓣：{valve_material}；\n（*）.密封：{sealing_type}"
+                elif "减压" in valve_name:
+                    sku = f"TP00{sealing_code}-{diameter}-{material_code}"
+                    medium_code = f"（*）.阀体：{valve_material}；\n（*）.阀芯：{valve_material}；\n（*）.密封：{sealing_type}"
+
                 else:
-                    sku = f"{valve_type_code}{connect_code}{drive_code}{sealing_code}-{diameter}-{material_code}"
+                    sku = f"{valve_type_code}{drive_code}{connect_code}{sealing_code}-{diameter}-{material_code}"
                     medium_code = f"(*).阀体：{valve_material}；\n（*）.阀芯：{valve_material}；\n（*）.密封：{sealing_type}"
                 
                 sku_list.append(sku)
@@ -235,10 +266,10 @@ class ValveAutomationProcess(BaseProcessor):
 
     def generate_parameter(self):
         try:
-            protocol_path = self.resource_path("dataset\\阀门选型手册.xlsx")
+            protocol_path = self.resource_path("../dataset/阀门选型手册.xlsx")
             
             # 实例化时确保传入了 logger
-            matcher = ValveProtocolMatcher(protocol_path)
+            matcher = ValveProtocolMatcher(protocol_path, self.logger)
             
             # 执行预处理
             result = matcher.load_and_preprocess()
@@ -254,8 +285,8 @@ class ValveAutomationProcess(BaseProcessor):
             self.logger.error(f"❌ 调用匹配器时发生顶层异常: {str(e)}")
 
         try:
-            medium_path = self.resource_path("dataset\\medium.xlsx")
-            filler = ParameterFiller(medium_path)
+            medium_path = self.resource_path("../dataset/阀门参数.xlsx")
+            filler = ParameterFiller(medium_path, self.logger)
             df_sort = filler.fill_dataframe(self.df_sort)
             self.logger.info("✅ 参数填充流程完成")
         except Exception as e:
@@ -263,15 +294,28 @@ class ValveAutomationProcess(BaseProcessor):
     
     def merge_by_SKU(self):
         self.df_sort['备注'] = self.df_sort['备注'].fillna('')
+
+        def expand_note(row):
+            """让备注条目数与该源行的“计数”保持一致。"""
+            note = str(row['备注']).strip()
+            if not note:
+                return ''
+            try:
+                repeat = max(0, int(float(row['计数'])))
+            except (TypeError, ValueError):
+                repeat = 1
+            return '\n'.join([note] * repeat)
+
+        self.df_sort['备注明细'] = self.df_sort.apply(expand_note, axis=1)
         aggregation = {
             '项目号': 'first',
-            '阀门形式': 'first',
+            '名称': 'first',
             '参数': 'first',
             '材质': 'first',
             '申购单备注': 'first',
-            '备注': lambda x:'\n'.join(item for item in x if item.strip() != ''),
-            '申购人': 'first',
-            '申购日期': 'first',
+            '备注明细': lambda x: '\n'.join(
+                item for item in x if str(item).strip() != ''
+            ),
             '*申购单类型': 'first',
             '计数': 'sum',
             '协议号': 'first'
@@ -279,42 +323,58 @@ class ValveAutomationProcess(BaseProcessor):
         cols_need = list(aggregation.keys())
         df_clean  = self.df_sort[['*SKU编号']+cols_need].copy()
         self.df_group = df_clean.groupby('*SKU编号',as_index=False).agg(aggregation)
+        self.df_group = self.df_group.rename(columns={'备注明细': '备注'})
         self.df_group['*申请数量'] = self.df_group['计数']
         self.df_group['所属项目'] = self.df_group['项目号']    
-        template_path = self.resource_path("dataset\\申购单导入模板.xlsx")
-        template_df =  pd.read_excel(template_path, engine='openpyxl',header = 1)
-        template_columns = [str(col).strip().replace('\n', '').replace('\r', '') for col in template_df.columns]
-        for col in template_columns:
-            if col not in self.df_group.columns:
-                # 特殊处理：将 UI 输入的名称映射到模板要求的名称
-                if col == "项目编号" and "项目号" in self.df_group.columns:
-                    self.df_group["项目编号"] = self.df_group["项目号"]
-                elif col == "需求日期" and "申购日期" in self.df_group.columns:
-                    self.df_group["需求日期"] = self.df_group["申购日期"]
-                elif col == "申请日期" and "申购日期" in self.df_group.columns:
-                    self.df_group["申请日期"] = self.df_group["申购日期"]
-                elif col=="产品名称" and "阀门形式" in self.df_group.columns:
-                    self.df_group["产品名称"] = self.df_group["阀门形式"]
-                elif col=="战略合作协议序号" and "协议号" in self.df_group.columns:
-                    self.df_group["战略合作协议序号"] = self.df_group["协议号"]
-                else:
-                    # 💡 这就是你要的效果：模板要求但数据没有的列，统一填空
-                    self.df_group[col] = ""
-        self.df_output = self.df_group[template_columns].reset_index(drop = True)
+        self.df_group["产品名称"] = self.df_group["名称"].astype(str).str.replace(
+            r'^[A-Z]+\d+(?:-\d+)?[A-Z]*\s*|\s*PID$',
+            '',
+            regex=True,
+        )
+        output_columns = [
+            '*SKU编号',
+            '产品名称',
+            '参数',
+            '材质',
+            '*申请数量',
+            '备注',
+        ]
+        self.df_output = self.df_group[output_columns].reset_index(drop=True)
 
-        book = load_workbook(template_path)
+        # 与仪表导出保持一致，但阀门全部写入同一个工作表。
+        book = Workbook()
         sheet = book.active
-        start_row = 3
-        for row_idx, row in self.df_output.iterrows():
+        sheet.title = "阀门"
+
+        for col_idx, column_name in enumerate(output_columns, start=1):
+            cell = sheet.cell(row=1, column=col_idx, value=column_name)
+            cell.alignment = Alignment(
+                horizontal='center',
+                vertical='center',
+                wrap_text=True,
+            )
+
+        for row_idx, row in enumerate(
+            self.df_output.itertuples(index=False, name=None),
+            start=2,
+        ):
             for col_idx, value in enumerate(row, start=1):
-                cell = sheet.cell(row=start_row + row_idx, column=col_idx)
-                cell.value = value
-                cell.alignment = Alignment(vertical='center', horizontal='center', wrap_text=True)
-                if col_idx == sheet.max_column:  # 如果是最后一列，设置自动换行
-                    cell.alignment = Alignment(wrap_text=True)
-        self.logger.info(f"✅ 已生成申购单")
+                cell = sheet.cell(
+                    row=row_idx,
+                    column=col_idx,
+                    value="" if pd.isna(value) else value,
+                )
+                cell.alignment = Alignment(
+                    horizontal='left',
+                    vertical='top',
+                    wrap_text=True,
+                )
+            note_lines = max(1, str(self.df_output.iloc[row_idx - 2]['备注']).count('\n') + 1)
+            sheet.row_dimensions[row_idx].height = 15 * note_lines
+
+        self.logger.info("✅ 已生成阀门汇总表")
         self.book = book
-        return book 
+        return book
 
 
 

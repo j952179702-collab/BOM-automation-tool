@@ -9,8 +9,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 # 导入您修改后的功能类
-from instrument_automation import InstrumentAutomationProcessor
-from valve_automation import ValveAutomationProcess  
+from src.instrument_automation import InstrumentAutomationProcessor
+from src.valve_automation import ValveAutomationProcess  
 import logging
 from PyQt5.QtCore import QAbstractTableModel, Qt
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTableView, QHeaderView
@@ -171,23 +171,7 @@ class Automationtool(QMainWindow):
         file_layout.addLayout(input_layout)
         file_group.setLayout(file_layout)
 
-        # 第二行：申购人
-        applicant_layout = QHBoxLayout() # 创建一个从左到右的水平布局
-        applicant_layout.addWidget(QLabel("申购人:")) #创建文字标签
-        self.instr_input_applicant = QLineEdit() #创建输入框
-        self.instr_input_applicant.setPlaceholderText("请输入申购人姓名") #提示底纹
-        applicant_layout.addWidget(self.instr_input_applicant) #把上述的东西放入水平布局中
-        file_layout.addLayout(applicant_layout)  # 添加到布局
-
-        # 第三行：申购日期
-        date_layout = QHBoxLayout() # 创建一个从左到右的水平布局
-        date_layout.addWidget(QLabel("需求日期:")) #创建文字标签
-        self.instr_input_date = QLineEdit() #创建输入框
-        self.instr_input_date.setPlaceholderText("需求日期") #提示底纹
-        date_layout.addWidget(self.instr_input_date) #把上述的东西放入水平布局中
-        file_layout.addLayout(date_layout)  # 添加到布局
-
-        # 第四行：项目号
+        # 第二行：项目号
         number_layout = QHBoxLayout() # 创建一个从左到右的水平布局
         number_layout.addWidget(QLabel("项目号:")) #创建文字标签
         self.instr_input_number = QLineEdit() #创建输入框
@@ -243,21 +227,21 @@ class Automationtool(QMainWindow):
         file_layout.addLayout(input_layout)
         file_group.setLayout(file_layout)
 
-        # 第二行：申购人
-        applicant_layout = QHBoxLayout() # 创建一个从左到右的水平布局
-        applicant_layout.addWidget(QLabel("申购人:")) #创建文字标签
-        self.valve_input_applicant = QLineEdit() #创建输入框
-        self.valve_input_applicant.setPlaceholderText("请输入申购人姓名") #提示底纹
-        applicant_layout.addWidget(self.valve_input_applicant) #把上述的东西放入水平布局中
-        file_layout.addLayout(applicant_layout)  # 添加到布局
+        # # 第二行：申购人
+        # applicant_layout = QHBoxLayout() # 创建一个从左到右的水平布局
+        # applicant_layout.addWidget(QLabel("申购人:")) #创建文字标签
+        # self.valve_input_applicant = QLineEdit() #创建输入框
+        # self.valve_input_applicant.setPlaceholderText("请输入申购人姓名") #提示底纹
+        # applicant_layout.addWidget(self.valve_input_applicant) #把上述的东西放入水平布局中
+        # file_layout.addLayout(applicant_layout)  # 添加到布局
 
-        # 第三行：申购日期
-        date_layout = QHBoxLayout() # 创建一个从左到右的水平布局
-        date_layout.addWidget(QLabel("需求日期:")) #创建文字标签
-        self.valve_input_date = QLineEdit() #创建输入框
-        self.valve_input_date.setPlaceholderText("需求日期") #提示底纹
-        date_layout.addWidget(self.valve_input_date) #把上述的东西放入水平布局中
-        file_layout.addLayout(date_layout)  # 添加到布局
+        # # 第三行：申购日期
+        # date_layout = QHBoxLayout() # 创建一个从左到右的水平布局
+        # date_layout.addWidget(QLabel("需求日期:")) #创建文字标签
+        # self.valve_input_date = QLineEdit() #创建输入框
+        # self.valve_input_date.setPlaceholderText("需求日期") #提示底纹
+        # date_layout.addWidget(self.valve_input_date) #把上述的东西放入水平布局中
+        # file_layout.addLayout(date_layout)  # 添加到布局
 
         # 第四行：项目号
         number_layout = QHBoxLayout() # 创建一个从左到右的水平布局
@@ -318,13 +302,11 @@ class Automationtool(QMainWindow):
                 "processor_class": InstrumentAutomationProcessor,
                 "inputs": {
                     "file": self.instr_input_file_path,
-                    "applicant": self.instr_input_applicant,
-                    "date": self.instr_input_date,
                     "number": self.instr_input_number,
                 },
                 # 定义仪表工具的执行步骤
                 "processing_steps": [
-                    {"method": "load_csv","store_as": "df"}, 
+                    {"method": "load_file","store_as": "df"}, 
                     # 执行 generate_code (仪表有此方法)
                     {"method": "generate_code","store_as": "df_sort"}, 
                     # 调用 get_note，需要传入 self.current_processor.df_sort 作为 df 参数
@@ -338,12 +320,10 @@ class Automationtool(QMainWindow):
                 "processor_class": ValveAutomationProcess,
                 "inputs": {
                     "file": self.valve_input_file_path,
-                    "applicant": self.valve_input_applicant,
-                    "date": self.valve_input_date,
                     "number": self.valve_input_number,
                 },
                 "processing_steps": [
-                    {"method": "load_csv","store_as": "df"}, 
+                    {"method": "load_file","store_as": "df"}, 
                     {"method": "generate_code","store_as": "df_sort"},
                     {"method":"generate_parameter","store_as":"df"},
                     {"method": "merge_by_SKU","store_as": "book"},
@@ -365,12 +345,6 @@ class Automationtool(QMainWindow):
         
         if not input_values["file"]:
             QMessageBox.warning(self, "警告", "请先选择输入文件！")
-            return
-        if not input_values["applicant"]:
-            QMessageBox.warning(self, "警告", "请输入申购人！")
-            return
-        if not input_values["date"]:
-            QMessageBox.warning(self, "警告", "请输入需求日期！")
             return
         if not input_values["number"]:
             QMessageBox.warning(self, "警告", "请输入项目号！")
@@ -425,12 +399,10 @@ class Automationtool(QMainWindow):
                     self.logger.info(f"结果已存储到 self.{step['store_as']}")
 
             # ----------------------------------------------------
-            # 统一写入申购人信息 (必须在处理循环后，且在保存前)
+            # 统一写入项目号（必须在处理循环后，且在保存前）
                 if method_name == "generate_code":
                     if hasattr(self.current_processor, 'df_sort') and self.current_processor.df_sort is not None:
                             # 1. 注入基础信息
-                            self.current_processor.df_sort['申购人'] = input_values["applicant"]
-                            self.current_processor.df_sort['申购日期'] = input_values["date"]
                             self.current_processor.df_sort['项目号'] = input_values["number"]
                             if tool_name == "阀门提单自动化工具":
                                 # 注意：这里要确保 '阀门名称' 列已经存在
@@ -447,9 +419,6 @@ class Automationtool(QMainWindow):
                                     self.current_processor.df_sort['项目号'].astype(str) + "_" + \
                                     self.current_processor.df_sort['仪表名称'].astype(str)+\
                                     self.current_processor.df_sort['仪表位号'].astype(str)
-                                
-                                self.current_processor.df_sort['申购单备注'] = \
-                                    f"【{input_values['number']}】仪表申购单-" + datetime.datetime.now().strftime("%Y-%m-%d")
                             
                             self.logger.info("✅ 已注入 UI 参数并预生成【备注】列")             
             else:
@@ -462,9 +431,7 @@ class Automationtool(QMainWindow):
         except Exception as e:
             self.logger.error(f"❌ 处理失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"【{tool_name}】处理失败：{str(e)}")
-
-        # 在 start_processing 函数的最后
-        self.logger.info(f"🎉 【{tool_name}】处理成功！")
+            return
         # 自动弹出预览窗口
         self.show_data_preview()
     def save_as_excel(self):
